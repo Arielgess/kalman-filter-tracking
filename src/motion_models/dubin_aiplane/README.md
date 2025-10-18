@@ -1,0 +1,1 @@
+The code in this directory was taken from the repository https://github.com/ntnu-arl/DubinsAirplane, and was converted to python3 using an LLM.
