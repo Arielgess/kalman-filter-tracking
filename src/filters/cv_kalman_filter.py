@@ -86,3 +86,16 @@ class CVKalmanFilter(BaseKalmanFilter):
 
         R = np.diag(initialization_data.observation_noise_std ** 2)
         return F, H, Q, R
+
+
+def _sym_psd(A):
+    """
+    Returns the symmetric positive semi-definite approximation of A
+    :param A:
+    :param eps:
+    :param diag_only:
+    :return:
+    """
+    A = 0.5 * (A + A.T)
+    D = np.clip(np.diag(A), 1e-10, None)
+    return np.diag(D)

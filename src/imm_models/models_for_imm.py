@@ -4,6 +4,8 @@ from filterpy.kalman import KalmanFilter, IMMEstimator, ExtendedKalmanFilter, Un
 from scipy.optimize import minimize
 from dataclasses import dataclass
 from typing import Optional
+import numpy as np
+from src.filters.base_extended_kalman_filter import BaseExtendedKalmanFilter
 
 # State dimension constants for IMM compatibility
 STATE_DIM_2D = 7   # [x, v_x, a_x, y, v_y, a_y, ω]
@@ -15,6 +17,7 @@ class InitializationData:
     process_noise_std: np.array
     white_accel_density: Optional[int] = None
     tau: Optional[float] = None
+    omega_std: Optional[float] = None
 
 
 #Matrices for choosing measurements from the state (updated for new state dimension)
@@ -310,10 +313,6 @@ class IMMConstantAccelerationKF(BaseKalmanFilter):
         R = np.diag(initialization_data.observation_noise_std**2)
         return F, H, Q, R
 
-import numpy as np
-from KalmanFilter.base_extended_kalman_filter import BaseExtendedKalmanFilter
-from KalmanFilter.base_kalman_filter import InitializationData
-
 
 def f_ct(state: np.ndarray, dt: float) -> np.ndarray:
     """
@@ -407,6 +406,7 @@ def build_Q_ct(omega, dt: float, q_acc: float, q_omega: float) -> np.ndarray:
     Q[4, 4] = q_omega * dt
     return Q
 
+
 def build_Q_ct_bla(omega: float, dt: float, q_acc: float, q_omega: float) -> np.ndarray:
     """
     Build the discrete-time process noise covariance Q for the Coordinated Turn (CT) model.
@@ -478,7 +478,6 @@ def build_Q_ct_bla(omega: float, dt: float, q_acc: float, q_omega: float) -> np.
     Q[0:4, 0:4] = Qv
     Q[4, 4] = q_omega * dt
     return Q
-
 
 
 class IMMCoordinatedTurnKF(BaseExtendedKalmanFilter):
