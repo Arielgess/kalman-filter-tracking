@@ -20,14 +20,14 @@ A Python framework for trajectory tracking using various Kalman filter implement
 - **Constant Acceleration (CA)**: Constant acceleration motion with noise
 - **Coordinated Turn (CT)**: Circular motion with constant turn rate
 - **Singer Model**: Correlated acceleration model with exponential decay
-- **Composite Trajectories**: Combination of multiple motion segments
+- **Composite Trajectories**: Combination of multiple motion segments, for example a composite trajectory can be composed from CA, CV and then CT sub-trajectories.
 - **Dubins Airplane**: 3D Dubins path generation for aircraft trajectories
 
 ### Evaluation and Visualization Tools
-- **Trajectory Classification**: Confusion matrix analysis for model comparison
-- **Performance Metrics**: MSE calculation with sliding window analysis
+- **Trajectory Classification**: Classification of trajectories against different KFs. One of the KFs must be the true fit. Outputs a Confusion Matrix
+- **Performance Metrics**: MSE calculation. Also possible to generate a graph of the MSE with sliding window analysis
 - **Visualization**: 2D/3D trajectory plotting with filtering results
-- **K-lag Analysis**: Multi-step prediction performance evaluation
+- **K-lag Analysis**: k-lag prediction. Supported both MSE calculation and the Visualization
 
 ## Installation
 
@@ -40,7 +40,7 @@ pip install -r requirements.txt
 The framework is organized into several modules:
 
 - `src/filters/`: Kalman filter implementations
-- `src/imm_models/`: IMM estimator and related utilities
+- `src/imm_models/`: KF Models supported by the IMM and related utilities
 - `src/motion_models/`: Trajectory generation functions
 - `src/evaluation_tools/`: Performance evaluation utilities
 - `src/visual/`: Plotting and visualization tools
@@ -51,32 +51,3 @@ See the `examples/` directory for detailed usage examples:
 2. **Classification Using Confusion Matrix**: Model comparison and classification
 3. **IMM**: Interacting Multiple Model implementation
 4. **Estimating Noise With EM**: Parameter estimation using EM algorithm
-
-## Dependencies
-
-- numpy
-- scipy
-- matplotlib
-- filterpy
-- scikit-learn
-
-## Structure
-
-```
-src/
-├── filters/                    # Kalman filter implementations
-├── imm_models/                 # IMM estimator and utilities
-├── motion_models/              # Trajectory generation
-│   ├── trajectory_generation/  # Basic motion models
-│   └── dubin_aiplane/         # Dubins airplane trajectories
-├── evaluation_tools/           # Performance evaluation
-└── visual/                    # Visualization utilities
-```
-
-## Examples
-
-The framework includes comprehensive examples demonstrating:
-- Basic trajectory tracking with different filter types
-- Model comparison using confusion matrices
-- IMM implementation for maneuvering targets
-- Parameter estimation with EM algorithm
