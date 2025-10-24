@@ -1,5 +1,6 @@
 import numpy as np
 from matplotlib import pyplot as plt
+from typing import List, Tuple, Optional, Union
 
 
 def plot_trajectory_simple(
@@ -279,5 +280,192 @@ def plot_trajectories_with_predictions_shifted(
 
         plt.tight_layout()
         plt.show()
+
+
+def calculate_mse_sliding_window(
+    predictions: np.ndarray,
+    true_values: np.ndarray,
+    k_lag: int = 1,
+    window_size: int = 10,
+    use_clean_signal: bool = True,
+    normalize_mse: bool = True
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Calculate MSE in a sliding window with k-lag support.
+    
+    The function calculates MSE by comparing predictions at time t with true values at time t+k_lag,
+    considering the k-lag offset. For example, prediction at t=0 with k_lag=5 should be compared
+    to true value at t=5.
+    
+    Parameters
+    ----------
+    predictions : np.ndarray
+        Array of shape (T_pred, d) containing predictions
+    true_values : np.ndarray  
+        Array of shape (T_true, d) containing true values (measurements or clean signal)
+    k_lag : int, default=1
+        The k-step lag. Prediction at time t is compared to true value at time t+k_lag
+    window_size : int, default=10
+        Size of the sliding window for MSE calculation
+    use_clean_signal : bool, default=True
+        If True, use clean signal for MSE calculation. If False, use measurements.
+    normalize_mse : bool, default=True
+        If True, normalize MSE by the second moment of the true values
+        
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        Tuple containing (mse_values, time_indices) where:
+        - mse_values: Array of MSE values for each window position
+        - time_indices: Array of time indices corresponding to the center of each window
+    """
+    predictions = np.asarray(predictions, dtype=float)
+    true_values = np.asarray(true_values, dtype=float)
+    
+    if predictions.ndim != 2 or true_values.ndim != 2:
+        raise ValueError("predictions and true_values must be 2D arrays")
+    
+    if predictions.shape[1] != true_values.shape[1]:
+        raise ValueError("predictions and true_values must have the same number of dimensions")
+    
+    T_true = true_values.shape[0]    
+    
+    # Calculate squared residuals for each valid prediction
+    squared_residuals = []
+    for t in range(len(predictions)):
+        # Prediction at time t should be compared to true value at time t + k_lag
+        true_idx = t + k_lag
+        if true_idx < T_true:
+            residual = true_values[true_idx] - predictions[t]
+            squared_residuals.append(residual @ residual)  # Dot product for squared norm
+    
+    squared_residuals = np.array(squared_residuals)
+    
+    # Calculate sliding window MSE
+    if len(squared_residuals) < window_size:
+        # If we have fewer points than window size, return single MSE value
+        mse_values = np.array([np.mean(squared_residuals)])
+        time_indices = np.array([len(squared_residuals) // 2])
+    else:
+        # Calculate MSE for each window position
+        mse_values = []
+        time_indices = []
+        
+        for i in range(len(squared_residuals) - window_size + 1):
+            window_residuals = squared_residuals[i:i + window_size]
+            mse = np.mean(window_residuals)
+            mse_values.append(mse)
+            time_indices.append(i + window_size // 2)  # Center of window
+        
+        mse_values = np.array(mse_values)
+        time_indices = np.array(time_indices)
+    
+    # Normalize MSE if requested
+    if normalize_mse:
+        # Use the same normalization as in base_kalman_filter.py
+        measurement_second_moment = np.mean((true_values - true_values.mean(axis=0, keepdims=True)) ** 2)
+        mse_values = mse_values / measurement_second_moment
+    
+    return mse_values, time_indices
+
+
+def plot_mse_over_time(
+    mse_values: np.ndarray,
+    time_indices: np.ndarray,
+    title: str = "MSE Over Time",
+    window_size: int = 10,
+    k_lag: int = 1,
+    figsize: Tuple[int, int] = (10, 6),
+    show_grid: bool = True
+) -> None:
+    """
+    Plot MSE values over time in a sliding window.
+    
+    Parameters
+    ----------
+    mse_values : np.ndarray
+        Array of MSE values for each window position
+    time_indices : np.ndarray
+        Array of time indices corresponding to the center of each window
+    title : str, default="MSE Over Time"
+        Title for the plot
+    window_size : int, default=10
+        Size of the sliding window (for display purposes)
+    k_lag : int, default=1
+        The k-step lag (for display purposes)
+    figsize : Tuple[int, int], default=(10, 6)
+        Figure size for the plot
+    show_grid : bool, default=True
+        Whether to show grid on the plot
+    """
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    ax.plot(time_indices, mse_values, 'b-', linewidth=2, label=f'MSE (window={window_size}, k={k_lag})')
+    ax.set_xlabel('Time (steps)')
+    ax.set_ylabel('MSE')
+    ax.set_title(title)
+    
+    if show_grid:
+        ax.grid(True, alpha=0.3)
+    
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def calculate_and_plot_mse_sliding_window(
+    predictions: np.ndarray,
+    true_values: np.ndarray,
+    k_lag: int = 1,
+    window_size: int = 10,
+    use_clean_signal: bool = True,
+    normalize_mse: bool = True,
+    title: Optional[str] = None,
+    figsize: Tuple[int, int] = (10, 6)
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Calculate MSE in a sliding window and plot it over time.
+    
+    This is a convenience function that combines calculate_mse_sliding_window and plot_mse_over_time.
+    
+    Parameters
+    ----------
+    predictions : np.ndarray
+        Array of shape (T_pred, d) containing predictions
+    true_values : np.ndarray  
+        Array of shape (T_true, d) containing true values (measurements or clean signal)
+    k_lag : int, default=1
+        The k-step lag. Prediction at time t is compared to true value at time t+k_lag
+    window_size : int, default=10
+        Size of the sliding window for MSE calculation
+    use_clean_signal : bool, default=True
+        If True, use clean signal for MSE calculation. If False, use measurements.
+    normalize_mse : bool, default=True
+        If True, normalize MSE by the second moment of the true values
+    title : str, optional
+        Title for the plot. If None, a default title will be generated.
+    figsize : Tuple[int, int], default=(10, 6)
+        Figure size for the plot
+        
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        Tuple containing (mse_values, time_indices) from calculate_mse_sliding_window
+    """
+    # Calculate MSE
+    mse_values, time_indices = calculate_mse_sliding_window(
+        predictions, true_values, k_lag, window_size, use_clean_signal, normalize_mse
+    )
+    
+    # Generate title if not provided
+    if title is None:
+        signal_type = "clean" if use_clean_signal else "measurements"
+        norm_str = "normalized" if normalize_mse else "raw"
+        title = f"MSE Over Time (k={k_lag}, window={window_size}, {signal_type}, {norm_str})"
+    
+    # Plot MSE
+    plot_mse_over_time(mse_values, time_indices, title, window_size, k_lag, figsize)
+    
+    return mse_values, time_indices
 
 

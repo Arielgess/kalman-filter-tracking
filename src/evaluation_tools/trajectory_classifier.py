@@ -11,7 +11,7 @@ def classify_confusion_matrix(filters: List[BaseKalmanFilter], trajectories: Lis
     confusion_matrix = np.zeros((len(filters), len(filters)))
 
     for i, trajectories in enumerate(trajectories):  # trajectories is a list that is related for some kf
-        for noisy_traj, clean_traj in trajectories:
+        for noisy_traj, clean_traj, _ in trajectories:  # Ignore the states
             mses = np.array([kf.evaluate_on_trajectory(
                 noisy_trajectory=noisy_traj,
                 clean_trajectory=clean_traj,
