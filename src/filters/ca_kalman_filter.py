@@ -69,7 +69,7 @@ class CAKalmanFilter(BaseKalmanFilter):
 
         if tie_axes:
             q_med = float(np.clip(np.median(qs), *q_bounds))
-            for a in range(self.dim_measurements):
+            for a in range(self.dim_measurement):
                 Qp[3 * a:3 * a + 3, 3 * a:3 * a + 3] = q_med * B
         return Qp
 
