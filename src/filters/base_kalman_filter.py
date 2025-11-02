@@ -211,7 +211,7 @@ class BaseKalmanFilter:
 
         squared_residuals = np.asarray(squared_residuals)
         measurements_for_mse = measurements if clean_signal is None else clean_signal
-        return self.calculate_mse(measurements_for_mse, squared_residuals, normalized=normalize_mse), predictions
+        return self.calculate_mse(measurements_for_mse[k:], predictions, normalized=normalize_mse), predictions
 
     def _kstep_predict_state(self,
                              x_t_t: np.ndarray,
@@ -275,10 +275,10 @@ class BaseKalmanFilter:
         raise NotImplementedError()
 
     @staticmethod
-    def calculate_mse(measurements, squared_residuals, normalized: bool = True):
+    def calculate_mse(measurements, predictions, normalized: bool = True):
         measurement_second_moment = np.mean((measurements - measurements.mean(axis=0, keepdims=True)) ** 2)
 
-        mse = float(np.mean(squared_residuals))
+        mse = float(np.mean((measurements - predictions)**2))
 
         if normalized:
             return mse / measurement_second_moment
