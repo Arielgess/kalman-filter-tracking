@@ -76,7 +76,7 @@ def F_ct(x: np.ndarray, dt: float) -> np.ndarray:
     return F
 
 
-def build_Q_ct(omega, dt: float, q_acc: float, q_omega: float) -> np.ndarray:
+def build_Q_ct_bla(omega, dt: float, q_acc: float, q_omega: float) -> np.ndarray:
     """
     Discrete-time process noise for the CT model.
     The omega is not used in this implementation, but can be used if we want a Q matrix that changes over time.
@@ -93,6 +93,78 @@ def build_Q_ct(omega, dt: float, q_acc: float, q_omega: float) -> np.ndarray:
     Q = np.zeros((5, 5))
     Q[0:2, 0:2] = qv
     Q[2:4, 2:4] = qv
+    Q[4, 4] = q_omega * dt
+    return Q
+
+def build_Q_ct(omega: float, dt: float, q_acc: float, q_omega: float) -> np.ndarray:
+    """
+    Build the discrete-time process noise covariance Q for the Coordinated Turn (CT) model.
+
+    Parameters
+    ----------
+    omega : float
+        Turn rate [rad/s].
+    dt : float
+        Sampling time [s].
+    q_acc : float
+        Power spectral density (PSD) of the white acceleration noise [m²/s³].
+    q_omega : float
+        Power spectral density of the angular rate noise [rad²/s].
+
+    Returns
+    -------
+    Q : np.ndarray, shape (5,5)
+        Discrete process noise covariance for state [x, y, v_x, v_y, ω].
+
+    Notes
+    -----
+    This is the ω-dependent form of Q, consistent with the continuous-time dynamics:
+
+        ẋ = v_x
+        ẏ = v_y
+        v̇_x = -ω v_y + a_x
+        v̇_y =  ω v_x + a_y
+        ω̇ = w_ω
+
+    It assumes:
+        - Acceleration noise PSD = q_acc (same in x/y)
+        - Angular acceleration noise PSD = q_omega
+    """
+
+    # Handle near-zero omega for numerical stability
+    omega_dt = omega * dt
+    if abs(omega_dt) < 1e-6:
+        # When omega ≈ 0 → straight-line motion (use CV-like approximation)
+        qv = q_acc * np.array([
+            [dt**4 / 4, dt**3 / 2],
+            [dt**3 / 2, dt**2]
+        ])
+        Q = np.zeros((5, 5))
+        Q[0:2, 0:2] = qv
+        Q[2:4, 2:4] = qv
+        Q[4, 4] = q_omega * dt
+        return Q
+
+    s = np.sin(omega_dt)
+    c = np.cos(omega_dt)
+
+    # These are derived from the continuous-time integration of rotated acceleration noise
+    # See: Bar-Shalom, "Tracking and Data Association", Sec. 6.5.3
+    q11 = (4 - 3 * c - omega_dt * s) / (2 * omega**4)
+    q12 = (omega_dt - s) / (2 * omega**3)
+    q13 = (1 - c) / omega**2
+    q22 = (2 * omega_dt - 4 * s + omega_dt * c) / (2 * omega**4)
+
+    Qv = q_acc * np.array([
+        [q11, q12, q13, 0],
+        [q12, q22, 0, q13],
+        [q13, 0, dt, 0],
+        [0, q13, 0, dt]
+    ])
+
+    # Assemble full 5×5 Q
+    Q = np.zeros((5, 5))
+    Q[0:4, 0:4] = Qv
     Q[4, 4] = q_omega * dt
     return Q
 

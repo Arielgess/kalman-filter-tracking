@@ -1,22 +1,28 @@
-# cv_traj_config.py
+# dataset_configurations.py
 """
-Structured config/orchestrator for CV-only synthetic trajectories with 4 classes.
-Keeps anti-bias rules B/C/E/F/G while staying lean.
+Generic dataset configuration and generation for motion model trajectories.
+Supports CV, CA, CT, and IMM (composite) models with clean polymorphic design.
 
-Requires in scope/import:
-  - TrajectoryState
-  - generate_cv_trajectory(T, dt, initial_state, vel_change_std, measurement_noise_std, number_of_trajectories=1, seed)
+Key features:
+- Model-agnostic specs using inheritance
+- Easy extensibility for new motion models
+- IMM support with composite trajectories
+- Generic parameter storage and metadata
 """
 
 from __future__ import annotations
 import math, json
 from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Any, Optional, Literal
+from abc import ABC, abstractmethod
 import numpy as np
-from src.motion_models.trajectory_generation.route_generation import TrajectoryState, generate_cv_trajectory
-
-# ---- If your generators are in another file, uncomment and edit this import ----
-# from your_generators_file import TrajectoryState, generate_cv_trajectory
+from src.motion_models.trajectory_generation.route_generation import (
+    TrajectoryState, 
+    generate_cv_trajectory,
+    generate_ca_trajectory,
+    generate_ct_trajectory_simple,
+    generate_composite_trajectory
+)
 
 
 # -----------------------------
@@ -62,25 +68,121 @@ def sample_vec(
         return np.full(dim, float(spec), dtype=float)
 
 # -----------------------------
+# Model Specifications (Polymorphic)
+# -----------------------------
+@dataclass
+class ModelSpec(ABC):
+    """Base class for all model specifications"""
+    measurement_noise_std: np.ndarray | ParamRange  # Common to all models
+    
+    @property
+    @abstractmethod
+    def model_type(self) -> str:
+        """Return the model type identifier"""
+        pass
+    
+    @abstractmethod
+    def get_generation_params(self, rng: np.random.Generator, dim: int) -> dict:
+        """Return sampled parameters as dict ready for the generator function"""
+        pass
+
+@dataclass
+class CVSpec(ModelSpec):
+    """Constant Velocity model specification"""
+    vel_change_std: np.ndarray | ParamRange  # per-axis accel-noise std (process)
+    
+    @property
+    def model_type(self) -> str:
+        return 'CV'
+    
+    def get_generation_params(self, rng: np.random.Generator, dim: int) -> dict:
+        return {
+            'vel_change_std': sample_vec(rng, self.vel_change_std, dim, per_axis=True),
+            'measurement_noise_std': sample_vec(rng, self.measurement_noise_std, dim, per_axis=True)
+        }
+
+@dataclass
+class CASpec(ModelSpec):
+    """Constant Acceleration model specification"""
+    accel_noise_std: np.ndarray | ParamRange
+    acceleration: np.ndarray | ParamRange  # Initial acceleration (required, can be sampled or fixed)
+    
+    @property
+    def model_type(self) -> str:
+        return 'CA'
+    
+    def get_generation_params(self, rng: np.random.Generator, dim: int) -> dict:
+        return {
+            'accel_noise_std': sample_vec(rng, self.accel_noise_std, dim, per_axis=True),
+            'acceleration': sample_vec(rng, self.acceleration, dim, per_axis=True),
+            'measurement_noise_std': sample_vec(rng, self.measurement_noise_std, dim, per_axis=True)
+        }
+
+@dataclass
+class CTSpec(ModelSpec):
+    """Coordinated Turn model specification"""
+    omega: ParamRange | float  # Turn rate
+    omega_noise_std: ParamRange | float  # Turn rate noise
+    z_acceleration: Optional[ParamRange | float] = None  # Z-axis acceleration for 3D
+    
+    @property
+    def model_type(self) -> str:
+        return 'CT'
+    
+    def get_generation_params(self, rng: np.random.Generator, dim: int) -> dict:
+        params = {
+            'omega': sample_vec(rng, self.omega, 1, per_axis=False)[0],
+            'omega_noise_std': sample_vec(rng, self.omega_noise_std, 1, per_axis=False)[0],
+            'measurement_noise_std': sample_vec(rng, self.measurement_noise_std, dim, per_axis=True)
+        }
+        if dim == 3 and self.z_acceleration is not None:
+            params['z_acceleration'] = sample_vec(rng, self.z_acceleration, 1, per_axis=False)[0]
+        return params
+
+@dataclass
+class SegmentSpec:
+    """Single segment in a composite (IMM) trajectory"""
+    model_spec: ModelSpec  # CV, CA, CT, etc.
+    T: int  # Time steps for this segment (fixed value for batching)
+
+@dataclass
+class IMMSpec(ModelSpec):
+    """Interacting Multiple Model (composite trajectory) specification"""
+    segments: List[SegmentSpec]  # List of segments that compose the trajectory
+    
+    @property
+    def model_type(self) -> str:
+        return 'IMM'
+    
+    def get_generation_params(self, rng: np.random.Generator, dim: int) -> dict:
+        """Generate parameters for all segments"""
+        segment_params = []
+        for seg in self.segments:
+            params = seg.model_spec.get_generation_params(rng, dim)
+            segment_params.append({
+                'model_type': seg.model_spec.model_type,
+                'T': seg.T,
+                'params': params
+            })
+        return {'segments': segment_params}
+
+# -----------------------------
 # Config dataclasses
 # -----------------------------
 @dataclass
-class CVSpec:
-    vel_change_std: np.ndarray | ParamRange      # per-axis accel-noise std (process)
-    measurement_noise_std: np.ndarray | ParamRange  # per-axis measurement noise std
-
-@dataclass
 class ClassConfig:
+    """Configuration for a single trajectory class"""
     name: str
-    cv: CVSpec
+    model_spec: ModelSpec  # Polymorphic - can be any ModelSpec subclass
     n_trajectories: int = 1000
 
 @dataclass
 class DatasetConfig:
+    """Configuration for the entire dataset"""
     seed: int = 7
     dim: int = 3
     dt: float = 0.04
-    T_range: Tuple[int, int] = (100, 150)            # aligned across classes (E)
+    T: int = 100  # Fixed time steps for all trajectories (for easier batching)
     # aligned initial-condition priors (E)
     init_pos_range: Tuple[float, float] = (-100.0, 100.0)
     init_speed_range: Tuple[float, float] = (-10.0, 25.0)
@@ -91,18 +193,74 @@ class DatasetConfig:
     split_bins: Dict[str, List[float]] = field(default_factory=lambda: {
         "vchange": [0.0, 0.05, 0.12, 0.25, 0.45, 0.8],
         "meas":    [0.0, 0.05, 0.12, 0.25, 0.45, 0.8],
+        "accel":   [0.0, 0.05, 0.12, 0.25, 0.45, 0.8],
+        "omega":   [-1.0, -0.5, -0.1, 0.1, 0.5, 1.0],
     })
 
 # -----------------------------
+# Trajectory Generator Registry
+# -----------------------------
+class TrajectoryGenerator:
+    """Registry of trajectory generation functions"""
+    
+    @staticmethod
+    def generate(
+        model_type: str,
+        T: Optional[int], #Will be ignored for IMM models
+        dt: float,
+        initial_state: TrajectoryState,
+        params: dict,
+        seed: int,
+        dim: int = 2
+    ) -> Tuple[np.ndarray, np.ndarray, TrajectoryState]:
+        """Dispatch to appropriate generator based on model type"""
+        if model_type == 'CV':
+            return generate_cv_trajectory(
+                T=T, dt=dt, initial_state=initial_state,
+                vel_change_std=params['vel_change_std'],
+                measurement_noise_std=params['measurement_noise_std'],
+                number_of_trajectories=1, seed=seed
+            )[0]
+        elif model_type == 'CA':
+            # Set acceleration (always present for CA)
+            initial_state.acceleration = params['acceleration']
+            return generate_ca_trajectory(
+                T=T, dt=dt, initial_state=initial_state,
+                accel_noise_std=params['accel_noise_std'],
+                measurement_noise_std=params['measurement_noise_std'],
+                number_of_trajectories=1, seed=seed
+            )[0]
+        elif model_type == 'CT':
+            return generate_ct_trajectory_simple(
+                T=T, dt=dt, omega=params['omega'], dim=dim,
+                initial_state=initial_state,
+                omega_noise_std=params['omega_noise_std'],
+                measurement_noise_std=params['measurement_noise_std'],
+                z_acceleration=params.get('z_acceleration'),
+                number_of_trajectories=1, seed=seed
+            )[0]
+        elif model_type == 'IMM':
+            # Build segment list for composite generation
+            segments = [(seg['model_type'], seg['T'], seg['params']) 
+                       for seg in params['segments']]
+            return generate_composite_trajectory(
+                trajectory_segments=segments,
+                dt=dt, dim=dim, initial_state=initial_state, seed=seed
+            )
+        else:
+            raise ValueError(f"Unknown model type: {model_type}")
+
+# -----------------------------
 # Default: 4 CV classes with overlapping ranges (B)
-#   All four differ, but there’s intentional overlap in both process & measurement noise.
+#   All four differ, but there's intentional overlap in both process & measurement noise.
 # -----------------------------
 def default_config(dim: int = 2) -> DatasetConfig:
+    """Create default configuration with 4 CV classes"""
     # process noise std ranges (per-axis accel noise in CV generator)
     # measurement noise std ranges (per-axis)
     CV_A = ClassConfig(
         name="CV_A",
-        cv=CVSpec(
+        model_spec=CVSpec(
             vel_change_std=np.array([0.2, 0.2], dtype=float),
             measurement_noise_std=np.array([0.4, 0.4], dtype=float),
         ),
@@ -110,7 +268,7 @@ def default_config(dim: int = 2) -> DatasetConfig:
     )
     CV_B = ClassConfig(
         name="CV_B",
-        cv=CVSpec(
+        model_spec=CVSpec(
             vel_change_std=np.array([0.4, 0.4], dtype=float),
             measurement_noise_std=np.array([0.4, 0.4], dtype=float),
         ),
@@ -118,7 +276,7 @@ def default_config(dim: int = 2) -> DatasetConfig:
     )
     CV_C = ClassConfig(
         name="CV_C",
-        cv=CVSpec(
+        model_spec=CVSpec(
             vel_change_std=np.array([0.3, 0.3], dtype=float),
             measurement_noise_std=np.array([0.4, 0.4], dtype=float),
         ),
@@ -126,7 +284,7 @@ def default_config(dim: int = 2) -> DatasetConfig:
     )
     CV_D = ClassConfig(
         name="CV_D",
-        cv=CVSpec(
+        model_spec=CVSpec(
             vel_change_std=np.array([0.05, 0.05], dtype=float),
             measurement_noise_std=np.array([0.4, 0.4], dtype=float),
         ),
@@ -137,9 +295,9 @@ def default_config(dim: int = 2) -> DatasetConfig:
         seed=7,
         dim=dim,
         dt=0.04,
-        T_range=(100, 100),
+        T=100,  # Fixed time steps
         init_pos_range=(-100.0, 100.0),
-        init_speed_range=(3.0, 25.0),
+        init_speed_range=(-25.0, 25.0),
         classes=[CV_A, CV_B, CV_C, CV_D],
         store_clean=True,
     )
@@ -158,34 +316,46 @@ def sample_initial_state(
     return TrajectoryState(position=pos, velocity=vel)
 
 # -----------------------------
-# Core dataset generation
+# Core dataset generation (Generic)
 # -----------------------------
 def generate_dataset(cfg: DatasetConfig) -> Dict[str, Any]:
+    """Generate dataset with support for CV, CA, CT, and IMM models"""
     master = np.random.default_rng(cfg.seed)
     X, Y, META = [], [], []
 
     for cls in cfg.classes:
         for _ in range(cls.n_trajectories):
-            T = int(master.integers(cfg.T_range[0], cfg.T_range[1] + 1))
+            # For non-IMM models, use dataset-level T
+            # For IMM, T is determined by segment specs
+            T = cfg.T if cls.model_spec.model_type != 'IMM' else None
+            
             tr_seed = int(master.integers(0, 2**32 - 1))
             rng = np.random.default_rng(tr_seed)
 
+            # Sample initial state
             init_state = sample_initial_state(
                 rng, cfg.dim, cfg.init_pos_range, cfg.init_speed_range
             )
-            # sample per-axis params with overlap (B)
-            vchange = sample_vec(rng, cls.cv.vel_change_std, cfg.dim, per_axis=True)
-            meas = sample_vec(rng, cls.cv.measurement_noise_std, cfg.dim, per_axis=True)
-
-            noisy, clean, _ = generate_cv_trajectory(
-                T=T, dt=cfg.dt, initial_state=init_state,
-                vel_change_std=vchange, measurement_noise_std=meas,
-                number_of_trajectories=1, seed=int(rng.integers(0, 2**32 - 1))
-            )[0]
+            
+            # Get model-specific parameters (polymorphic call)
+            params = cls.model_spec.get_generation_params(rng, cfg.dim)
+            
+            # Generate trajectory using registry
+            noisy, clean, final_state = TrajectoryGenerator.generate(
+                model_type=cls.model_spec.model_type,
+                T=T,
+                dt=cfg.dt,
+                initial_state=init_state,
+                params=params,
+                seed=int(rng.integers(0, 2**32 - 1)),
+                dim=cfg.dim
+            )
 
             X.append(noisy)
             if cfg.store_clean:
                 Y.append(clean)
+            
+            # Generic metadata storage
             initial_state_dict = {
                 "position": init_state.position.tolist(),
                 "velocity": init_state.velocity.tolist(),
@@ -193,26 +363,85 @@ def generate_dataset(cfg: DatasetConfig) -> Dict[str, Any]:
             if init_state.acceleration is not None:
                 initial_state_dict["acceleration"] = init_state.acceleration.tolist()
             
+            # Store all parameters generically
             META.append({
                 "class": cls.name,
-                "T": T,
+                "model_type": cls.model_spec.model_type,
+                "T": T if T is not None else len(noisy),
                 "dt": cfg.dt,
                 "seed": tr_seed,
                 "initial_state": initial_state_dict,
-                "params": {
-                    "vel_change_std": vchange.tolist(),
-                    "measurement_noise_std": meas.tolist(),
-                },
-                # bins for split-by-regime (F)
-                "bins": {
-                    "vchange": _digitize_safe(float(np.mean(vchange)), cfg.split_bins["vchange"]),
-                    "meas":    _digitize_safe(float(np.mean(meas)), cfg.split_bins["meas"]),
-                }
+                "params": _serialize_params(params),  # Recursively serialize all params
+                #"bins": _compute_bins(params, cfg.split_bins, cls.model_spec.model_type)
             })
 
     return {"X": X, "Y": Y if cfg.store_clean else None, "meta": META, "config": _cfg_to_py(cfg)}
 
+# -----------------------------
+# Helper Functions
+# -----------------------------
+def _serialize_params(params: dict) -> dict:
+    """Recursively convert numpy arrays to lists for JSON serialization"""
+    result = {}
+    for key, val in params.items():
+        if isinstance(val, np.ndarray):
+            result[key] = val.tolist()
+        elif isinstance(val, list):
+            result[key] = [_serialize_params(v) if isinstance(v, dict) else v for v in val]
+        elif isinstance(val, dict):
+            result[key] = _serialize_params(val)
+        else:
+            result[key] = float(val) if isinstance(val, (np.floating, np.integer)) else val
+    return result
+
+def _compute_bins(params: dict, split_bins: dict, model_type: str) -> dict:
+    """Compute regime bins based on model type and parameters"""
+    bins = {}
+    
+    if model_type == 'CV':
+        if 'vel_change_std' in params:
+            bins['vchange'] = _digitize_safe(
+                float(np.mean(params['vel_change_std'])), 
+                split_bins.get('vchange', [])
+            )
+        if 'measurement_noise_std' in params:
+            bins['meas'] = _digitize_safe(
+                float(np.mean(params['measurement_noise_std'])), 
+                split_bins.get('meas', [])
+            )
+    elif model_type == 'CA':
+        if 'accel_noise_std' in params:
+            bins['accel'] = _digitize_safe(
+                float(np.mean(params['accel_noise_std'])), 
+                split_bins.get('accel', [])
+            )
+        if 'measurement_noise_std' in params:
+            bins['meas'] = _digitize_safe(
+                float(np.mean(params['measurement_noise_std'])), 
+                split_bins.get('meas', [])
+            )
+    elif model_type == 'CT':
+        if 'omega' in params:
+            bins['omega'] = _digitize_safe(
+                float(params['omega']), 
+                split_bins.get('omega', [])
+            )
+        if 'measurement_noise_std' in params:
+            bins['meas'] = _digitize_safe(
+                float(np.mean(params['measurement_noise_std'])), 
+                split_bins.get('meas', [])
+            )
+    elif model_type == 'IMM':
+        # For IMM, bin based on aggregated segment properties
+        # Could be extended to track segment-specific bins
+        bins['composite'] = 0  # Placeholder for now
+    
+    return bins
+
 def _digitize_safe(x: float, edges: List[float]) -> int:
+    """Safely bin a value into discrete bins"""
+    if not edges:
+        return 0
     return int(np.clip(np.digitize([x], edges, right=False)[0] - 1, 0, len(edges) - 2))
 
 def _cfg_to_py(cfg: DatasetConfig) -> Dict[str, Any]:
@@ -256,76 +485,239 @@ def stratified_split_by_bins(meta: List[Dict[str, Any]], ratios=(0.7, 0.15, 0.15
     return train, val, test
 
 # -----------------------------
-# Quick overlap diagnostics (B/E/G)
+# Quick overlap diagnostics (B/E/G) - Model-Agnostic
 # -----------------------------
 def quick_overlap_checks(meta: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Summarize per-class means and pairwise histogram overlaps for vchange & meas.
+    Summarize per-class means and pairwise histogram overlaps.
+    Works with any model type (CV, CA, CT, IMM).
     If overlaps < ~0.3 persistently, your ranges may leak labels.
     """
     from collections import defaultdict
 
     def extract(meta, cls, key):
+        """Extract parameter values across all trajectories of a class"""
         vals = []
         for m in meta:
-            if m["class"] != cls: continue
-            arr = m["params"][key]
-            vals.append(float(np.mean(np.array(arr))))
+            if m["class"] != cls:
+                continue
+            if key in m["params"]:
+                arr = m["params"][key]
+                if isinstance(arr, list):
+                    vals.append(float(np.mean(np.array(arr))))
+                else:
+                    vals.append(float(arr))
         return np.array(vals, dtype=float) if vals else np.array([])
 
     classes = sorted(set(m["class"] for m in meta))
     per_class = {}
+    
     for c in classes:
-        vc = extract(meta, c, "vel_change_std")
-        ms = extract(meta, c, "measurement_noise_std")
-        T = np.array([m["T"] for m in meta if m["class"] == c], dtype=float)
-        per_class[c] = {
-            "vchange_mean": float(vc.mean()) if len(vc) else None,
-            "meas_mean": float(ms.mean()) if len(ms) else None,
-            "T_mean": float(T.mean()) if len(T) else None,
+        # Get model type for this class
+        model_type = next((m["model_type"] for m in meta if m["class"] == c), None)
+        
+        # Extract relevant parameters based on model type
+        class_stats = {
+            "model_type": model_type,
+            "T_mean": float(np.mean([m["T"] for m in meta if m["class"] == c])),
         }
+        
+        # Add model-specific parameters
+        if model_type == 'CV':
+            vc = extract(meta, c, "vel_change_std")
+            ms = extract(meta, c, "measurement_noise_std")
+            if len(vc): class_stats["vchange_mean"] = float(vc.mean())
+            if len(ms): class_stats["meas_mean"] = float(ms.mean())
+        elif model_type == 'CA':
+            ac = extract(meta, c, "accel_noise_std")
+            ms = extract(meta, c, "measurement_noise_std")
+            if len(ac): class_stats["accel_mean"] = float(ac.mean())
+            if len(ms): class_stats["meas_mean"] = float(ms.mean())
+        elif model_type == 'CT':
+            om = extract(meta, c, "omega")
+            ms = extract(meta, c, "measurement_noise_std")
+            if len(om): class_stats["omega_mean"] = float(om.mean())
+            if len(ms): class_stats["meas_mean"] = float(ms.mean())
+        
+        per_class[c] = class_stats
 
     def overlap(a: np.ndarray, b: np.ndarray, bins=30):
-        if len(a)==0 or len(b)==0: return 0.0
+        """Calculate histogram overlap between two distributions"""
+        if len(a) == 0 or len(b) == 0:
+            return 0.0
         lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
-        if lo == hi: return 1.0
+        if lo == hi:
+            return 1.0
         ha, _ = np.histogram(a, bins=bins, range=(lo, hi), density=True)
         hb, _ = np.histogram(b, bins=bins, range=(lo, hi), density=True)
         return float(np.sum(np.minimum(ha, hb)) * (hi - lo) / bins)
 
+    # Compute pairwise overlaps for common parameters
     pairwise = []
     for i, ci in enumerate(classes):
         for cj in classes[i+1:]:
-            vci = extract(meta, ci, "vel_change_std")
-            vcj = extract(meta, cj, "vel_change_std")
+            # Measurement noise is common to all models
             mci = extract(meta, ci, "measurement_noise_std")
             mcj = extract(meta, cj, "measurement_noise_std")
-            pairwise.append({
+            
+            overlap_data = {
                 "pair": (ci, cj),
-                "vchange_overlap": overlap(vci, vcj),
-                "meas_overlap": overlap(mci, mcj),
-            })
+                "meas_overlap": overlap(mci, mcj) if len(mci) and len(mcj) else None,
+            }
+            
+            # Add model-specific overlaps if both classes use same model type
+            model_i = next((m["model_type"] for m in meta if m["class"] == ci), None)
+            model_j = next((m["model_type"] for m in meta if m["class"] == cj), None)
+            
+            if model_i == model_j == 'CV':
+                vci = extract(meta, ci, "vel_change_std")
+                vcj = extract(meta, cj, "vel_change_std")
+                overlap_data["vchange_overlap"] = overlap(vci, vcj) if len(vci) and len(vcj) else None
+            elif model_i == model_j == 'CA':
+                aci = extract(meta, ci, "accel_noise_std")
+                acj = extract(meta, cj, "accel_noise_std")
+                overlap_data["accel_overlap"] = overlap(aci, acj) if len(aci) and len(acj) else None
+            elif model_i == model_j == 'CT':
+                omi = extract(meta, ci, "omega")
+                omj = extract(meta, cj, "omega")
+                overlap_data["omega_overlap"] = overlap(omi, omj) if len(omi) and len(omj) else None
+            
+            pairwise.append(overlap_data)
 
     return {"per_class": per_class, "pairwise_overlap": pairwise}
+
+# -----------------------------
+# Example Configurations for Different Models
+# -----------------------------
+def mixed_model_config(dim: int = 2) -> DatasetConfig:
+    """Example configuration with CV, CA, CT, and IMM models"""
+    
+    # CV classes
+    cv_fast = ClassConfig(
+        name="CV_Fast",
+        model_spec=CVSpec(
+            vel_change_std=ParamRange(0.3, 0.5),
+            measurement_noise_std=np.array([0.4, 0.4]),
+        ),
+        n_trajectories=25
+    )
+    
+    cv_slow = ClassConfig(
+        name="CV_Slow",
+        model_spec=CVSpec(
+            vel_change_std=np.array([0.05, 0.05]),
+            measurement_noise_std=np.array([0.4, 0.4]),
+        ),
+        n_trajectories=25
+    )
+    
+    # CA class
+    ca_smooth = ClassConfig(
+        name="CA_Smooth",
+        model_spec=CASpec(
+            accel_noise_std=ParamRange(0.05, 0.15),
+            acceleration=np.array([0.5, 0.5]),  # Fixed initial acceleration
+            measurement_noise_std=np.array([0.3, 0.3]),
+        ),
+        n_trajectories=25
+    )
+    
+    # CT class
+    ct_turning = ClassConfig(
+        name="CT_Turning",
+        model_spec=CTSpec(
+            omega=ParamRange(-0.3, 0.3),  # Variable turn rate
+            omega_noise_std=0.01,
+            measurement_noise_std=np.array([0.3, 0.3]),
+        ),
+        n_trajectories=25
+    )
+    
+    # IMM class (composite: CV -> CA -> CV)
+    imm_mixed = ClassConfig(
+        name="IMM_Mixed",
+        model_spec=IMMSpec(
+            segments=[
+                SegmentSpec(
+                    model_spec=CVSpec(
+                        vel_change_std=np.array([0.1, 0.1]),
+                        measurement_noise_std=np.array([0.3, 0.3]),
+                    ),
+                    T=40
+                ),
+                SegmentSpec(
+                    model_spec=CASpec(
+                        accel_noise_std=np.array([0.1, 0.1]),
+                        acceleration=np.array([1.0, 1.0]),
+                        measurement_noise_std=np.array([0.3, 0.3]),
+                    ),
+                    T=30
+                ),
+                SegmentSpec(
+                    model_spec=CVSpec(
+                        vel_change_std=np.array([0.1, 0.1]),
+                        measurement_noise_std=np.array([0.3, 0.3]),
+                    ),
+                    T=30
+                ),
+            ]
+        ),
+        n_trajectories=25
+    )
+    
+    return DatasetConfig(
+        seed=42,
+        dim=dim,
+        dt=0.04,
+        T=100,  # Fixed time for non-IMM models
+        init_pos_range=(-50.0, 50.0),
+        init_speed_range=(2.0, 15.0),
+        classes=[cv_fast, cv_slow, ca_smooth, ct_turning, imm_mixed],
+        store_clean=True,
+    )
 
 # -----------------------------
 # Main (example)
 # -----------------------------
 if __name__ == "__main__":
+    print("=" * 60)
+    print("Example 1: Default CV-only configuration")
+    print("=" * 60)
     cfg = default_config(dim=2)
     data = generate_dataset(cfg)
-    print(f"Generated {len(data['X'])} trajectories "
-          f"(classes: {[c.name for c in cfg.classes]})")
-
+    print(f"Generated {len(data['X'])} trajectories")
+    print(f"Classes: {[c.name for c in cfg.classes]}")
+    print(f"Model types: {set(m['model_type'] for m in data['meta'])}")
+    
     diag = quick_overlap_checks(data["meta"])
-    print(json.dumps(diag, indent=2))
+    print("\nPer-class statistics:")
+    print(json.dumps(diag["per_class"], indent=2))
 
     train, val, test = stratified_split_by_bins(data["meta"])
-    print(f"Split sizes: train={len(train)}  val={len(val)}  test={len(test)}")
-
+    print(f"\nSplit sizes: train={len(train)}  val={len(val)}  test={len(test)}")
+    
+    print("\n" + "=" * 60)
+    print("Example 2: Mixed model configuration (CV, CA, CT, IMM)")
+    print("=" * 60)
+    cfg_mixed = mixed_model_config(dim=2)
+    data_mixed = generate_dataset(cfg_mixed)
+    print(f"Generated {len(data_mixed['X'])} trajectories")
+    print(f"Classes: {[c.name for c in cfg_mixed.classes]}")
+    print(f"Model types: {set(m['model_type'] for m in data_mixed['meta'])}")
+    
+    diag_mixed = quick_overlap_checks(data_mixed["meta"])
+    print("\nPer-class statistics:")
+    print(json.dumps(diag_mixed["per_class"], indent=2))
+    
+    # Check IMM metadata to see segment information
+    imm_sample = next((m for m in data_mixed['meta'] if m['model_type'] == 'IMM'), None)
+    if imm_sample:
+        print("\nIMM trajectory sample metadata:")
+        print(json.dumps(imm_sample, indent=2))
+    
     # Optional save:
-    # np.savez_compressed("cv_only_positions.npz",
+    # np.savez_compressed("trajectories.npz",
     #     X=[x.astype(np.float32) for x in data['X']],
     #     Y=[y.astype(np.float32) for y in (data['Y'] or [])])
-    # with open("cv_only_meta.json", "w") as f:
+    # with open("trajectories_meta.json", "w") as f:
     #     json.dump(data["meta"], f, indent=2)
