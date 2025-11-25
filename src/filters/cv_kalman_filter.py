@@ -32,7 +32,7 @@ class CVKalmanFilter(BaseKalmanFilter):
         return x0
 
     def _get_P0_from_measurements(self, measurements: np.ndarray) -> np.ndarray:
-        return np.eye(self.dim * 2) * 1e1
+        return np.eye(self.dim * 2) * 1e3
 
     def _project_Q(self, Q):
         return _sym_psd(Q)

@@ -436,12 +436,69 @@ def generate_singer_trajectory(
     return trajectories
 
 
+def _generate_blueprint_segments(
+    blueprint_segments: List[Tuple[str, int, dict]],
+    target_T: int,
+    min_length: int,
+    max_length: int,
+    rng: np.random.Generator
+) -> List[Tuple[str, int, dict]]:
+    """
+    Generate randomized segments by treating input segments as blueprints.
+    
+    Randomly selects from blueprint segments and assigns random lengths
+    until the total trajectory length reaches target_T.
+    
+    Args:
+        blueprint_segments: List of (model_type, _, params) tuples to use as templates
+        target_T: Total desired trajectory length
+        min_length: Minimum length for each generated segment
+        max_length: Maximum length for each generated segment
+        rng: Random number generator
+        
+    Returns:
+        List of (model_type, steps, params) tuples for the randomized trajectory
+    """
+    generated_segments = []
+    current_length = 0
+    
+    while current_length < target_T:
+        remaining = target_T - current_length
+        
+        # If remaining time is less than min_length, fill with CV motion
+        if remaining < min_length:
+            # Use CV with moderate noise as filler
+            cv_params = {
+                'vel_change_std': 0.1,
+                'measurement_noise_std': 0.3
+            }
+            generated_segments.append(('CV', remaining, cv_params))
+            break
+        
+        # Randomly select a blueprint segment
+        blueprint_idx = rng.integers(0, len(blueprint_segments))
+        model_type, _, params = blueprint_segments[blueprint_idx]
+        
+        # Random length within bounds
+        segment_length = rng.integers(min_length, min(max_length, remaining) + 1)
+        
+        generated_segments.append((model_type, segment_length, params))
+        current_length += segment_length
+    
+    return generated_segments
+
+
 def generate_composite_trajectory(
     trajectory_segments: List[Tuple[str, int, dict]],  # (model_type, steps, params)
     dt: float,
     dim: int = 2,
     initial_state: Optional[TrajectoryState] = None,
     seed: int | None = None,
+    randomize_order: bool = False,  # Simple randomization: shuffle segment order
+    randomize_blueprint: bool = False,  # Advanced: treat as blueprints with random lengths
+    min_segment_length: int = 20,  # Min segment length for blueprint mode
+    max_segment_length: int = 60,  # Max segment length for blueprint mode
+    target_T: Optional[int] = None,  # Total target length for blueprint mode
 ) -> Tuple[np.ndarray, np.ndarray, TrajectoryState]:
     """
     Generate a composite trajectory composed of multiple trajectory segments.
@@ -449,18 +506,37 @@ def generate_composite_trajectory(
     Args:
         trajectory_segments: List of (model_type, steps, params) tuples where:
             - model_type: 'CV', 'CA', 'CT', or 'SINGER'
-            - steps: Number of time steps for this segment
+            - steps: Number of time steps for this segment (ignored if randomize_blueprint=True)
             - params: Dictionary of parameters for the specific model
                 For CT: omega (required), omega_noise_std, measurement_noise_std, z_acceleration (3D only)
         dt: Time step duration
         dim: Dimensionality (2 or 3)
         initial_state: Initial state. If None, random initialization
         seed: RNG seed
+        randomize_order: If True, shuffle the order of segments (simple randomization)
+        randomize_blueprint: If True, treat segments as blueprints and generate trajectory
+            by randomly selecting segments with random lengths until target_T is reached
+        min_segment_length: Minimum segment length for blueprint mode
+        max_segment_length: Maximum segment length for blueprint mode
+        target_T: Total target trajectory length for blueprint mode (required if randomize_blueprint=True)
         
     Returns:
         (noisy_positions, clean_positions, final_state) tuple
     """
     rng = np.random.default_rng(seed)
+    
+    # Handle randomization modes
+    if randomize_blueprint:
+        if target_T is None:
+            raise ValueError("target_T must be specified when randomize_blueprint=True")
+        # Advanced blueprint-based randomization
+        trajectory_segments = _generate_blueprint_segments(
+            trajectory_segments, target_T, min_segment_length, max_segment_length, rng
+        )
+    elif randomize_order:
+        # Simple shuffle randomization
+        trajectory_segments = trajectory_segments.copy()
+        rng.shuffle(trajectory_segments)
     
     # Initialize state
     if initial_state is None:

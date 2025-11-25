@@ -1,0 +1,13 @@
+{
+  "model_type": "CV",
+  "params": {
+    "vel_change_std": [
+      0.1,
+      0.1
+    ],
+    "measurement_noise_std": [
+      0.1,
+      0.1
+    ]
+  }
+}

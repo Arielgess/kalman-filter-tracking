@@ -23,6 +23,7 @@ from src.motion_models.trajectory_generation.route_generation import (
     generate_ct_trajectory_simple,
     generate_composite_trajectory
 )
+from src.dataset.random_gen import random_generator
 
 
 # -----------------------------
@@ -34,7 +35,8 @@ class ParamRange:
     high: float
     kind: Literal["uniform", "loguniform"] = "uniform"
 
-    def sample(self, rng: np.random.Generator) -> float:
+    def sample(self) -> float:
+        rng = random_generator.get_rng()
         if self.kind == "uniform":
             return float(rng.uniform(self.low, self.high))
         elif self.kind == "loguniform":
@@ -44,7 +46,6 @@ class ParamRange:
             raise ValueError(f"Unknown range kind: {self.kind}")
 
 def sample_vec(
-    rng: np.random.Generator,
     spec: ParamRange | Tuple[float, float] | float | np.ndarray,
     dim: int,
     per_axis: bool = True,
@@ -59,11 +60,11 @@ def sample_vec(
             raise ValueError(f"Array shape {spec.shape} incompatible with dim={dim}")
     elif isinstance(spec, ParamRange):
         if per_axis:
-            return np.array([spec.sample(rng) for _ in range(dim)], dtype=float)
-        v = spec.sample(rng)
+            return np.array([spec.sample() for _ in range(dim)], dtype=float)
+        v = spec.sample()
         return np.full(dim, v, dtype=float)
     elif isinstance(spec, tuple):
-        return sample_vec(rng, ParamRange(spec[0], spec[1]), dim, per_axis)
+        return sample_vec(ParamRange(spec[0], spec[1]), dim, per_axis)
     else:
         return np.full(dim, float(spec), dtype=float)
 
@@ -82,7 +83,7 @@ class ModelSpec(ABC):
         pass
     
     @abstractmethod
-    def get_generation_params(self, rng: np.random.Generator, dim: int) -> dict:
+    def get_generation_params(self, dim: int) -> dict:
         """Return sampled parameters as dict ready for the generator function"""
         pass
 
@@ -95,11 +96,38 @@ class CVSpec(ModelSpec):
     def model_type(self) -> str:
         return 'CV'
     
-    def get_generation_params(self, rng: np.random.Generator, dim: int) -> dict:
+    def get_generation_params(self, dim: int) -> dict:
         return {
-            'vel_change_std': sample_vec(rng, self.vel_change_std, dim, per_axis=True),
-            'measurement_noise_std': sample_vec(rng, self.measurement_noise_std, dim, per_axis=True)
+            'vel_change_std': sample_vec(self.vel_change_std, dim, per_axis=True),
+            'measurement_noise_std': sample_vec(self.measurement_noise_std, dim, per_axis=True)
         }
+    
+    def create_kf(self, dt: float, dim: int):
+        """Create a Kalman Filter for this CV model specification
+        
+        Oracle IMM: Uses exact noise parameters from spec (assumes they are sampled values, not ranges)
+        """
+        from src.imm_models.models_for_imm import IMMConstantVelocityKF, InitializationData
+        
+        # Convert to arrays if needed
+        if isinstance(self.vel_change_std, np.ndarray):
+            process_noise = self.vel_change_std
+        else:
+            process_noise = np.full(dim, float(self.vel_change_std))
+        
+        if isinstance(self.measurement_noise_std, np.ndarray):
+            obs_noise = self.measurement_noise_std
+        else:
+            obs_noise = np.full(dim, float(self.measurement_noise_std))
+        
+        init_data = InitializationData(
+            observation_noise_std=obs_noise,
+            process_noise_std=process_noise
+        )
+        
+        kf = IMMConstantVelocityKF(dim, 7, dim, dt=dt, initialization_data=init_data)
+        kf.initialize()
+        return kf
 
 @dataclass
 class CASpec(ModelSpec):
@@ -111,12 +139,40 @@ class CASpec(ModelSpec):
     def model_type(self) -> str:
         return 'CA'
     
-    def get_generation_params(self, rng: np.random.Generator, dim: int) -> dict:
+    def get_generation_params(self, dim: int) -> dict:
         return {
-            'accel_noise_std': sample_vec(rng, self.accel_noise_std, dim, per_axis=True),
-            'acceleration': sample_vec(rng, self.acceleration, dim, per_axis=True),
-            'measurement_noise_std': sample_vec(rng, self.measurement_noise_std, dim, per_axis=True)
+            'accel_noise_std': sample_vec(self.accel_noise_std, dim, per_axis=True),
+            'acceleration': sample_vec(self.acceleration, dim, per_axis=True),
+            'measurement_noise_std': sample_vec(self.measurement_noise_std, dim, per_axis=True)
         }
+    
+    def create_kf(self, dt: float, dim: int):
+        """Create a Kalman Filter for this CA model specification
+        
+        Oracle IMM: Uses exact noise parameters from spec (assumes they are sampled values, not ranges)
+        """
+        from src.imm_models.models_for_imm import IMMConstantAccelerationKF, InitializationData
+        
+        # Convert to arrays if needed
+        if isinstance(self.accel_noise_std, np.ndarray):
+            process_noise = self.accel_noise_std
+        else:
+            process_noise = np.full(dim, float(self.accel_noise_std))
+        
+        if isinstance(self.measurement_noise_std, np.ndarray):
+            obs_noise = self.measurement_noise_std
+        else:
+            obs_noise = np.full(dim, float(self.measurement_noise_std))
+        
+        init_data = InitializationData(
+            observation_noise_std=obs_noise,
+            process_noise_std=process_noise,
+            white_accel_density=(process_noise**2 / dt).mean()
+        )
+        
+        kf = IMMConstantAccelerationKF(dim, 7, dim, dt=dt, initialization_data=init_data)
+        kf.initialize()
+        return kf
 
 @dataclass
 class CTSpec(ModelSpec):
@@ -129,15 +185,44 @@ class CTSpec(ModelSpec):
     def model_type(self) -> str:
         return 'CT'
     
-    def get_generation_params(self, rng: np.random.Generator, dim: int) -> dict:
+    def get_generation_params(self, dim: int) -> dict:
         params = {
-            'omega': sample_vec(rng, self.omega, 1, per_axis=False)[0],
-            'omega_noise_std': sample_vec(rng, self.omega_noise_std, 1, per_axis=False)[0],
-            'measurement_noise_std': sample_vec(rng, self.measurement_noise_std, dim, per_axis=True)
+            'omega': sample_vec(self.omega, 1, per_axis=False)[0],
+            'omega_noise_std': sample_vec(self.omega_noise_std, 1, per_axis=False)[0],
+            'measurement_noise_std': sample_vec(self.measurement_noise_std, dim, per_axis=True)
         }
         if dim == 3 and self.z_acceleration is not None:
-            params['z_acceleration'] = sample_vec(rng, self.z_acceleration, 1, per_axis=False)[0]
+            params['z_acceleration'] = sample_vec(self.z_acceleration, 1, per_axis=False)[0]
         return params
+    
+    def create_kf(self, dt: float, dim: int):
+        """Create a Kalman Filter for this CT model specification
+        
+        Oracle IMM: Uses exact noise parameters from spec (assumes they are sampled values, not ranges)
+        """
+        from src.imm_models.models_for_imm import IMMCoordinatedTurnKF, InitializationData
+        
+        # Get omega noise std
+        omega_std = float(self.omega_noise_std)
+        
+        # Get measurement noise
+        if isinstance(self.measurement_noise_std, np.ndarray):
+            obs_noise = self.measurement_noise_std
+        else:
+            obs_noise = np.full(dim, float(self.measurement_noise_std))
+        
+        # For CT, process noise is typically lower
+        process_noise = np.full(dim, omega_std * 0.5)
+        
+        init_data = InitializationData(
+            observation_noise_std=obs_noise,
+            process_noise_std=process_noise,
+            omega_std=omega_std
+        )
+        
+        kf = IMMCoordinatedTurnKF(dim, 7, dim, dt=dt, initialization_data=init_data)
+        kf.initialize()
+        return kf
 
 @dataclass
 class SegmentSpec:
@@ -149,22 +234,61 @@ class SegmentSpec:
 class IMMSpec(ModelSpec):
     """Interacting Multiple Model (composite trajectory) specification"""
     segments: List[SegmentSpec]  # List of segments that compose the trajectory
+    randomize_order: bool = False  # Simple randomization: shuffle segment order
+    randomize_blueprint: bool = False  # Advanced: treat as blueprints with random lengths
+    min_segment_length: int = 10  # Min segment length for blueprint mode
+    max_segment_length: int = 40  # Max segment length for blueprint mode
     
     @property
     def model_type(self) -> str:
         return 'IMM'
     
-    def get_generation_params(self, rng: np.random.Generator, dim: int) -> dict:
+    def get_generation_params(self, dim: int) -> dict:
         """Generate parameters for all segments"""
         segment_params = []
         for seg in self.segments:
-            params = seg.model_spec.get_generation_params(rng, dim)
+            params = seg.model_spec.get_generation_params(dim)
             segment_params.append({
                 'model_type': seg.model_spec.model_type,
                 'T': seg.T,
                 'params': params
             })
-        return {'segments': segment_params}
+        return {
+            'segments': segment_params,
+            'randomize_order': self.randomize_order,
+            'randomize_blueprint': self.randomize_blueprint,
+            'min_segment_length': self.min_segment_length,
+            'max_segment_length': self.max_segment_length
+        }
+    
+    def create_imm(self, dt: float, dim: int):
+        """
+        Create an IMM estimator by instantiating a KF for EACH segment using the
+        segment's ModelSpec.create_kf(), then building an IMM with a diagonal-dominant
+        transition matrix and uniform initial mode probabilities.
+        """
+        from filterpy.kalman import IMMEstimator
+
+        # Build filters: one per segment (no dedup unless desired explicitly)
+        filters = []
+        for seg in self.segments:
+            if not hasattr(seg.model_spec, "create_kf"):
+                raise ValueError(f"ModelSpec of type '{seg.model_spec.model_type}' does not implement create_kf(dt, dim)")
+            filters.append(seg.model_spec.create_kf(dt=dt, dim=dim))
+
+        n_filters = len(filters)
+        if n_filters == 0:
+            raise ValueError("IMMSpec.create_imm() called with no segments defined")
+
+        # Transition matrix M: diagonal-dominant, small off-diagonal (e.g., 0.01)
+        off_diag = 0.01
+        M = np.full((n_filters, n_filters), off_diag, dtype=float)
+        np.fill_diagonal(M, 1.0 - off_diag * (n_filters - 1))
+
+        # Uniform initial mode probabilities
+        mu = np.full(n_filters, 1.0 / n_filters, dtype=float)
+
+        return IMMEstimator(filters, mu, M)
 
 # -----------------------------
 # Config dataclasses
@@ -245,7 +369,12 @@ class TrajectoryGenerator:
                        for seg in params['segments']]
             return generate_composite_trajectory(
                 trajectory_segments=segments,
-                dt=dt, dim=dim, initial_state=initial_state, seed=seed
+                dt=dt, dim=dim, initial_state=initial_state, seed=seed,
+                randomize_order=params.get('randomize_order', False),
+                randomize_blueprint=params.get('randomize_blueprint', False),
+                min_segment_length=params.get('min_segment_length', 10),
+                max_segment_length=params.get('max_segment_length', 40),
+                target_T=T  # Pass the dataset-level T for blueprint mode
             )
         else:
             raise ValueError(f"Unknown model type: {model_type}")
@@ -306,11 +435,11 @@ def default_config(dim: int = 2) -> DatasetConfig:
 # Single unified RNG + pipeline (C)
 # -----------------------------
 def sample_initial_state(
-    rng: np.random.Generator,
     dim: int,
     pos_r: Tuple[float, float],
     speed_r: Tuple[float, float],
 ) -> TrajectoryState:
+    rng = random_generator.get_rng()
     pos = rng.uniform(pos_r[0], pos_r[1], size=dim)
     vel = rng.uniform(speed_r[0], speed_r[1], size=dim)
     return TrajectoryState(position=pos, velocity=vel)
@@ -319,26 +448,48 @@ def sample_initial_state(
 # Core dataset generation (Generic)
 # -----------------------------
 def generate_dataset(cfg: DatasetConfig) -> Dict[str, Any]:
-    """Generate dataset with support for CV, CA, CT, and IMM models"""
-    master = np.random.default_rng(cfg.seed)
-    X, Y, META = [], [], []
+    """Generate dataset with support for CV, CA, CT, and IMM models
+    
+    Returns:
+        Dictionary mapping class names to their data:
+        {
+            "ClassName1": {"X": [...], "Y": [...], "meta": [...]},
+            "ClassName2": {"X": [...], "Y": [...], "meta": [...]},
+            ...
+            "config": DatasetConfig as dict
+        }
+    """
+    # Initialize singleton RNG with dataset seed
+    
+    # Initialize dictionary to store data per class
+    dataset = {}
 
     for cls in cfg.classes:
+        # Initialize lists for this class
+        X_class = []
+        Y_class = []
+        META_class = []
+        
         for _ in range(cls.n_trajectories):
             # For non-IMM models, use dataset-level T
-            # For IMM, T is determined by segment specs
-            T = cfg.T if cls.model_spec.model_type != 'IMM' else None
+            # For IMM with blueprint randomization, use dataset-level T as target
+            # For IMM without randomization, T is determined by sum of segment specs
+            if cls.model_spec.model_type != 'IMM':
+                T = cfg.T
+            elif hasattr(cls.model_spec, 'randomize_blueprint') and cls.model_spec.randomize_blueprint:
+                T = cfg.T  # Blueprint mode needs target length
+            else:
+                T = None  # Sequential IMM uses segment lengths
             
-            tr_seed = int(master.integers(0, 2**32 - 1))
-            rng = np.random.default_rng(tr_seed)
+            tr_seed = random_generator.get_rng().integers(0, 2**32 - 1)
 
             # Sample initial state
             init_state = sample_initial_state(
-                rng, cfg.dim, cfg.init_pos_range, cfg.init_speed_range
+                cfg.dim, cfg.init_pos_range, cfg.init_speed_range
             )
             
             # Get model-specific parameters (polymorphic call)
-            params = cls.model_spec.get_generation_params(rng, cfg.dim)
+            params = cls.model_spec.get_generation_params(cfg.dim)
             
             # Generate trajectory using registry
             noisy, clean, final_state = TrajectoryGenerator.generate(
@@ -347,13 +498,14 @@ def generate_dataset(cfg: DatasetConfig) -> Dict[str, Any]:
                 dt=cfg.dt,
                 initial_state=init_state,
                 params=params,
-                seed=int(rng.integers(0, 2**32 - 1)),
+                seed=tr_seed,
                 dim=cfg.dim
             )
 
-            X.append(noisy)
+            # Copy arrays to avoid reference issues
+            X_class.append(noisy.copy())
             if cfg.store_clean:
-                Y.append(clean)
+                Y_class.append(clean.copy())
             
             # Generic metadata storage
             initial_state_dict = {
@@ -364,7 +516,7 @@ def generate_dataset(cfg: DatasetConfig) -> Dict[str, Any]:
                 initial_state_dict["acceleration"] = init_state.acceleration.tolist()
             
             # Store all parameters generically
-            META.append({
+            META_class.append({
                 "class": cls.name,
                 "model_type": cls.model_spec.model_type,
                 "T": T if T is not None else len(noisy),
@@ -374,8 +526,18 @@ def generate_dataset(cfg: DatasetConfig) -> Dict[str, Any]:
                 "params": _serialize_params(params),  # Recursively serialize all params
                 #"bins": _compute_bins(params, cfg.split_bins, cls.model_spec.model_type)
             })
-
-    return {"X": X, "Y": Y if cfg.store_clean else None, "meta": META, "config": _cfg_to_py(cfg)}
+        
+        # Store this class's data in the dataset dictionary
+        dataset[cls.name] = {
+            "X": X_class,
+            "Y": Y_class if cfg.store_clean else None,
+            "meta": META_class
+        }
+    
+    # Add config to the dataset
+    dataset["config"] = _cfg_to_py(cfg)
+    
+    return dataset
 
 # -----------------------------
 # Helper Functions
