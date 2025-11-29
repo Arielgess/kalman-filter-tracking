@@ -217,8 +217,9 @@ def train_epoch_fp16(
         batch_time = time.time() - batch_start
         elapsed = time.time() - epoch_start
         eta = (elapsed / (batch_idx + 1)) * (total_batches - batch_idx - 1)
-        print(f"  Batch {batch_idx + 1}/{total_batches} | Loss: {loss.item()*grad_accum_steps:.6f} | "
-              f"Time: {batch_time:.2f}s | ETA: {eta/60:.1f}min")
+        if batch_idx % 10 == 0 or batch_idx == total_batches - 1:
+            print(f"  Batch {batch_idx + 1}/{total_batches} | Loss: {loss.item()*grad_accum_steps:.6f} | "
+                  f"Time: {batch_time:.2f}s | ETA: {eta/60:.1f}min")
     
     # Handle remaining gradients
     if num_batches % grad_accum_steps != 0:
