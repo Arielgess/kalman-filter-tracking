@@ -233,21 +233,37 @@ class SegmentSpec:
 @dataclass
 class IMMSpec(ModelSpec):
     """Interacting Multiple Model (composite trajectory) specification"""
-    segments: List[SegmentSpec]  # List of segments that compose the trajectory
+    segments: List[SegmentSpec] = field(default_factory=list)  # List of segments that compose the trajectory
     randomize_order: bool = False  # Simple randomization: shuffle segment order
     randomize_blueprint: bool = False  # Advanced: treat as blueprints with random lengths
     min_segment_length: int = 10  # Min segment length for blueprint mode
     max_segment_length: int = 40  # Max segment length for blueprint mode
+    measurement_noise_std: Optional[np.ndarray | ParamRange] = None  # Override: if provided, all segments use the same sampled value
     
     @property
     def model_type(self) -> str:
         return 'IMM'
     
     def get_generation_params(self, dim: int) -> dict:
-        """Generate parameters for all segments"""
+        """Generate parameters for all segments
+        
+        If measurement_noise_std is provided at IMMSpec level, sample it once
+        and use the same value for all segments in this trajectory.
+        Otherwise, each segment uses its own measurement_noise_std.
+        """
+        # Sample trajectory-level measurement_noise_std if provided
+        trajectory_meas_noise = None
+        if self.measurement_noise_std is not None:
+            trajectory_meas_noise = sample_vec(self.measurement_noise_std, dim, per_axis=True)
+        
         segment_params = []
         for seg in self.segments:
             params = seg.model_spec.get_generation_params(dim)
+            
+            # Override measurement_noise_std if trajectory-level value was sampled
+            if trajectory_meas_noise is not None:
+                params['measurement_noise_std'] = trajectory_meas_noise
+            
             segment_params.append({
                 'model_type': seg.model_spec.model_type,
                 'T': seg.T,
@@ -298,7 +314,7 @@ class ClassConfig:
     """Configuration for a single trajectory class"""
     name: str
     model_spec: ModelSpec  # Polymorphic - can be any ModelSpec subclass
-    n_trajectories: int = 1000
+    n_trajectories: int = 20
 
 @dataclass
 class DatasetConfig:
