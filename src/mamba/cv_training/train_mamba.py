@@ -161,7 +161,7 @@ print(f"\nModel created with {sum(p.numel() for p in model.parameters())} parame
 # Loss function and optimizer
 criterion = nn.MSELoss()
 optimizer = Adam(model.parameters(), lr=config['learning_rate'])
-scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
 
 # Create checkpoint directory
 checkpoint_dir = Path(config['checkpoint_dir'])
