@@ -42,7 +42,7 @@ def main():
     # Parse arguments
     parser = argparse.ArgumentParser(description='Train Mamba model on segment switch data')
     parser.add_argument('--num_epochs', type=int, default=5, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size (default 16 for 6GB GPU)')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size (default 16 for 6GB GPU)')
     parser.add_argument('--from_scratch', action='store_true', help='Train from scratch')
     parser.add_argument('--checkpoint_path', type=str, default=None, help='Checkpoint to resume from')
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate')
@@ -233,7 +233,7 @@ def main():
     print(f"Model parameters: {n_params:,}")
     
     # Loss and optimizer
-    criterion = nn.MSELoss()
+    criterion = nn.L1Loss()  # Changed from MSELoss to L1Loss
     optimizer = AdamW(
         model.parameters(),
         lr=config['learning_rate'],
@@ -241,7 +241,7 @@ def main():
     )
     
     # Learning rate scheduler
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     
     # Create checkpoint directory
     checkpoint_dir = Path(config['checkpoint_dir'])
@@ -254,6 +254,11 @@ def main():
     best_val_loss = float('inf')
     patience_counter = 0
     
+    # Create log file for L1 losses
+    log_file = checkpoint_dir / "training_log.txt"
+    with open(log_file, 'w') as f:
+        f.write("Epoch\tTrain_L1_Loss\tVal_L1_Loss\n")
+    
     if not args.from_scratch and args.checkpoint_path:
         checkpoint_path = Path(args.checkpoint_path)
         if checkpoint_path.exists():
@@ -263,8 +268,14 @@ def main():
             best_val_loss = min(val_losses) if val_losses else float('inf')
     elif not args.from_scratch:
         # Try to load latest checkpoint
-        checkpoints = sorted(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
+        import re
+        checkpoints = list(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
         if checkpoints:
+            # Sort by epoch number (numeric) instead of alphabetically
+            def get_epoch_number(path):
+                match = re.search(r'checkpoint_epoch_(\d+)\.pt', path.name)
+                return int(match.group(1)) if match else 0
+            checkpoints.sort(key=get_epoch_number)
             latest = checkpoints[-1]
             print(f"\nFound checkpoint: {latest}")
             start_epoch, train_losses, val_losses = load_checkpoint(
@@ -301,9 +312,13 @@ def main():
         scheduler.step(val_loss)
         current_lr = optimizer.param_groups[0]['lr']
         
-        print(f"\nTrain Loss: {train_loss:.6f}")
-        print(f"Val Loss: {val_loss:.6f}")
+        print(f"\nTrain Loss (L1): {train_loss:.6f}")
+        print(f"Val Loss (L1): {val_loss:.6f}")
         print(f"LR: {current_lr:.2e}")
+        
+        # Write L1 losses to log file
+        with open(log_file, 'a') as f:
+            f.write(f"{epoch + 1}\t{train_loss:.6f}\t{val_loss:.6f}\n")
         
         # Save checkpoint every 5 epochs
         checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch + 1}.pt"

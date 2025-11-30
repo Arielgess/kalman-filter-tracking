@@ -62,7 +62,7 @@ def train_epoch(
         optimizer.zero_grad()
         predictions = model(X_input, dt_input)  # (B, T-1, 2)
         
-        # Compute loss
+        # Compute loss (L1)
         loss = criterion(predictions, Y_target)
         
         # Backward pass
