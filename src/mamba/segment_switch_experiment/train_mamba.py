@@ -45,7 +45,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size (default 16 for 6GB GPU)')
     parser.add_argument('--from_scratch', action='store_true', help='Train from scratch')
     parser.add_argument('--checkpoint_path', type=str, default=None, help='Checkpoint to resume from')
-    parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate')
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate')
     args = parser.parse_args()
     
     # Device setup
@@ -254,10 +254,12 @@ def main():
     best_val_loss = float('inf')
     patience_counter = 0
     
-    # Create log file for L1 losses
+    # Create log file for L1 losses (append mode to preserve history)
     log_file = checkpoint_dir / "training_log.txt"
-    with open(log_file, 'w') as f:
-        f.write("Epoch\tTrain_L1_Loss\tVal_L1_Loss\n")
+    # Only write header if file doesn't exist
+    if not log_file.exists():
+        with open(log_file, 'w') as f:
+            f.write("Epoch\tTrain_L1_Loss\tVal_L1_Loss\n")
     
     if not args.from_scratch and args.checkpoint_path:
         checkpoint_path = Path(args.checkpoint_path)
